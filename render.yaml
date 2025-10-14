@@ -1,0 +1,5 @@
+services:
+  - type: worker
+    name: mexc-bot
+    env: python
+    startCommand: python main.py
