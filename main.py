@@ -1,125 +1,123 @@
 import asyncio
 import aiohttp
-import json
-import os
-from datetime import datetime, timezone, timedelta
 import pandas as pd
 import pandas_ta as ta
+from datetime import datetime, timezone, timedelta
 from telegram import Bot
 
-# ============ إعدادات عامة ============
+# ==========================
+# إعدادات البوت
+# ==========================
 BOT_TOKEN = "8097310973:AAE68aYlgPb1onGzvWDk4GbYWlPJBNQOzJI"
 CHAT_ID = "8137529944"
 
-BASE_URL     = "https://api.mexc.com/api/v3"
-TIMEFRAME    = "4h"
-VOLUME_LIMIT = 500_000          # حد أدنى للسيولة (Quote Volume)
-MAX_SYMBOLS  = 300              # أعلى عدد عملات نفحصها
-CHECK_GAP_S  = 3600             # كل كم ثانية نعيد التحليل الكامل (ساعة)
-TARGET_PING_S= 300              # كل كم ثانية نراجع الأهداف (5 دقائق)
-TARGETS      = [10, 30, 50, 100]# الأهداف المئوية
-
-STATE_FILE   = "state.json"     # تخزين آخر إشارات لدراسة تحقيق الأهداف
-
 bot = Bot(token=BOT_TOKEN)
-sent_alerts = set()             # منع تكرار نفس التنبيه فورياً
 
-# ============ أدوات مساعدة ============
-def tz_now_str():
-    # نحول لتوقيت عُمان تقريبياً (+4)
-    now = datetime.now(timezone.utc) + timedelta(hours=4)
-    return now.strftime("%d-%m-%Y %H:%M (%Z)")
+# ==========================
+# إعدادات السوق
+# ==========================
+BASE_URL       = "https://api.mexc.com/api/v3"
+TIMEFRAME      = "4h"          # فريم 4 ساعات
+VOLUME_LIMIT   = 500_000       # حد أدنى للسيولة لتمرير الرمز للتصفية الأولية
+MAX_SYMBOLS    = 300           # أقصى عدد عملات نفحصها في الدورة
+LOOKBACK_LOW   = 90            # عدد الشموع (≈ 15 يوم) لحساب "القاع"
+RSI_LO, RSI_HI = 45, 70        # شروط RSI لسيولة المال الذكي
+
+# لتفادي تكرار الإشعارات
+sent_alerts = set()
+
+# ==========================
+# أدوات مساعدة
+# ==========================
+def now_oman():
+    return (datetime.now(timezone.utc) + timedelta(hours=4)).strftime("%d-%m-%Y %H:%M")
 
 def mexc_link(symbol: str) -> str:
     return f"https://www.mexc.com/exchange/{symbol.replace('USDT','_USDT')}"
 
-def load_state():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {"positions": {}}  # {symbol: {"entry": float, "time": iso, "hit": [10,30,...]}}
-
-def save_state(state):
-    try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print("❌ خطأ حفظ الحالة:", e)
-
 async def send_message(text: str):
     try:
+        # تأخير بسيط لتفادي ضغط اتصال تيليجرام
         await asyncio.sleep(0.4)
         await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="HTML", disable_web_page_preview=False)
     except Exception as e:
         print("❌ خطأ في إرسال الرسالة:", e)
 
-# ============ التحليل الأساسي ============
-async def analyze_symbol(session: aiohttp.ClientSession, symbol: str, state: dict):
+# ==========================
+# تحليل وإرسال “سيولة المال الذكي”
+# ==========================
+async def analyze_symbol(session: aiohttp.ClientSession, symbol: str):
     try:
-        url = f"{BASE_URL}/klines?symbol={symbol}&interval={TIMEFRAME}&limit=200"
-        async with session.get(url) as resp:
-            kdata = await resp.json()
+        # شموع 4h
+        k_url = f"{BASE_URL}/klines?symbol={symbol}&interval={TIMEFRAME}&limit=200"
+        async with session.get(k_url, timeout=12) as r:
+            kdata = await r.json()
 
-        if not isinstance(kdata, list) or len(kdata) < 50:
+        if not isinstance(kdata, list) or len(kdata) < max(LOOKBACK_LOW, 200//2):
             return
 
-        # أعمدة 8 أو 12
-        cols8  = ['timestamp','open','high','low','close','volume','_','__']
-        cols12 = ['timestamp','open','high','low','close','volume','_','__','___','____','_____','______']
+        # أعمدة (8 أو 12)
+        cols8  = ['t','o','h','l','c','v','_','__']
+        cols12 = ['t','o','h','l','c','v','_','__','___','____','_____','______']
         df = pd.DataFrame(kdata, columns=cols8 if len(kdata[0]) == 8 else cols12)
 
-        df["close"] = df["close"].astype(float)
-        df["EMA200"] = ta.ema(df["close"], length=200)
-        df["RSI"]    = ta.rsi(df["close"],  length=14)
+        # تحويل أرقام
+        df["c"] = df["c"].astype(float)
+        df["l"] = df["l"].astype(float)
 
-        last_close = float(df["close"].iloc[-1])
-        ema200     = float(df["EMA200"].iloc[-1])
-        rsi        = float(df["RSI"].iloc[-1])
+        # مؤشرات
+        df["ema200"] = ta.ema(df["c"], length=200)
+        df["rsi"]    = ta.rsi(df["c"], length=14)
 
-        # منطق "سيولة المال الذكي"
-        strength = None
-        analysis = None
+        last_close = float(df["c"].iloc[-1])
+        ema200     = float(df["ema200"].iloc[-1])
+        rsi        = float(df["rsi"].iloc[-1])
 
-        if last_close > ema200 and rsi < 70:
-            strength = "🚀 دخول سيولة مال ذكي"
-            analysis = "💡 دخول مبكر من المال الذكي قبل الانفجار 🔥"
-        elif last_close > ema200 and 70 <= rsi <= 80:
-            strength = "⚡ سيولة قوية"
-            analysis = "📊 استمرار دخول سيولة مرتفعة"
-        elif last_close < ema200 and rsi < 30:
-            strength = "📉 خروج سيولة"
-            analysis = "⚠️ خروج محتمل من السيولة أو تصحيح"
+        # قاع آخر 15 يوم تقريبًا (90 شمعة 4h)
+        recent = df.tail(LOOKBACK_LOW)
+        recent_low = float(recent["l"].min())
+        if recent_low <= 0:
+            return
+        rebound_pct = (last_close - recent_low) / recent_low * 100.0
+
+        # بيانات 24 ساعة (للحجم)
+        t_url = f"{BASE_URL}/ticker/24hr?symbol={symbol}"
+        async with session.get(t_url, timeout=10) as r2:
+            t = await r2.json()
+        if not isinstance(t, dict):
+            return
+
+        quote_volume = float(t.get("quoteVolume", 0.0) or 0.0)  # USDT تقريبًا
+        # تصنيف السيولة الداخلة
+        if quote_volume >= 5_000_000:
+            liq_tag = "💧 سيولة قوية"
+        elif quote_volume >= 1_500_000:
+            liq_tag = "💧 سيولة متوسطة"
         else:
-            return  # لا تنبيه
+            liq_tag = "💧 سيولة منخفضة"
 
-        alert_key = f"{symbol}-{strength}"
+        # منطق “سيولة المال الذكي”: اتجاه صاعد + RSI صحي
+        if not (last_close > ema200 and RSI_LO <= rsi <= RSI_HI):
+            return
+
+        # مفتاح لمنع التكرار
+        alert_key = f"{symbol}-smartinflow"
         if alert_key in sent_alerts:
             return
         sent_alerts.add(alert_key)
 
-        # خزّن “سعر الدخول” لمتابعة الأهداف
-        pos = state["positions"].get(symbol)
-        if pos is None or last_close > pos.get("entry", 0) * 1.02 or last_close < pos.get("entry", 0) * 0.98:
-            state["positions"][symbol] = {
-                "entry": last_close,
-                "time":  datetime.utcnow().isoformat(),
-                "hit":   []  # الأهداف التي حققها
-            }
-            save_state(state)
-
+        # رسالة منسّقة
         msg = (
-            f"{strength}\n"
+            "🚀 <b>دخول سيولة مال ذكي</b>\n\n"
             f"💎 <b>العملة:</b> {symbol}\n"
             f"💵 <b>السعر الحالي:</b> {last_close:.8f} USDT\n"
+            f"📉 <b>EMA200:</b> {ema200:.6f}\n"
             f"📈 <b>RSI:</b> {rsi:.2f}\n"
-            f"📏 <b>EMA200:</b> {ema200:.6f}\n"
-            f"🕒 <b>الفريم:</b> {TIMEFRAME}\n"
-            f"💹 <b>نوع التداول:</b> سبوت\n"
-            f"⏰ <b>الوقت:</b> {tz_now_str()}\n\n"
-            f"🧠 <b>تحليل:</b> {analysis}\n"
+            f"📊 <b>الارتداد من القاع:</b> +{rebound_pct:.2f}% (آخر ~15 يوم)\n"
+            f"💸 <b>حجم التداول 24 ساعة:</b> {quote_volume:,.0f} USDT\n"
+            f"{liq_tag}\n"
+            "💹 <b>نوع التداول:</b> سبوت\n"
+            f"⏰ <b>الوقت:</b> {now_oman()}\n\n"
             f"🔗 <a href='{mexc_link(symbol)}'>فتح الشارت على MEXC</a>"
         )
         await send_message(msg)
@@ -127,116 +125,41 @@ async def analyze_symbol(session: aiohttp.ClientSession, symbol: str, state: dic
     except Exception as e:
         print(f"⚠️ خطأ في تحليل {symbol}: {e}")
 
+# ==========================
+# دورة التحليل الكاملة
+# ==========================
 async def run_analysis():
-    state = load_state()
     async with aiohttp.ClientSession() as session:
-        async with session.get(f"{BASE_URL}/ticker/24hr") as resp:
+        # قائمة السوق 24 ساعة
+        async with session.get(f"{BASE_URL}/ticker/24hr", timeout=15) as resp:
             tickers = await resp.json()
 
-        # فلترة USDT + سيولة قوية
+        # نختار فقط أزواج USDT ذات سيولة كافية
         symbols = [
             t["symbol"] for t in tickers
             if t.get("symbol","").endswith("USDT")
             and float(t.get("quoteVolume", 0) or 0) >= VOLUME_LIMIT
         ]
         symbols = symbols[:MAX_SYMBOLS]
-        print(f"🔍 يتم فحص {len(symbols)} عملة ذات سيولة قوية...")
 
-        sem = asyncio.Semaphore(10)
+        print(f"🔍 يتم فحص {len(symbols)} عملة ذات سيولة كافية...")
+        sem = asyncio.Semaphore(10)  # تحديد المهام المتزامنة لتفادي ضغط الشبكة
 
         async def safe(sym):
             async with sem:
-                await analyze_symbol(session, sym, state)
+                await analyze_symbol(session, sym)
 
         await asyncio.gather(*[safe(s) for s in symbols])
         print("✅ التحليل اكتمل!")
 
-# ============ متابعة الأهداف ============
-async def check_targets():
-    """يراجع الأهداف للرموز التي لديها دخول محفوظ"""
-    state = load_state()
-    positions = state.get("positions", {})
-    if not positions:
-        return
-
-    symbols = list(positions.keys())
-    async with aiohttp.ClientSession() as session:
-        # نجيب أسعار حالية بسرعة
-        # /ticker/price يُرجع lastPrice لرمز واحد؛ نستخدم /ticker/24hr لأننا نحتاج عدة رموز
-        async with session.get(f"{BASE_URL}/ticker/24hr") as resp:
-            all_ticks = await resp.json()
-
-        price_map = {}
-        for t in all_ticks:
-            s = t.get("symbol")
-            if s in symbols:
-                try:
-                    price_map[s] = float(t.get("lastPrice") or t.get("lastPrice", 0.0))
-                except:
-                    pass
-
-        # راجع كل رمز
-        updated = False
-        for sym, info in positions.items():
-            entry = float(info.get("entry", 0))
-            hit   = info.get("hit", [])
-            last  = price_map.get(sym)
-            if entry <= 0 or last is None:
-                continue
-
-            change_pct = (last - entry) / entry * 100.0
-
-            # ابحث عن أهداف لم تُحقق بعد
-            for target in TARGETS:
-                if target in hit:
-                    continue
-                if change_pct >= target:
-                    hit.append(target)
-                    updated = True
-                    msg = (
-                        f"🎯 <b>تحقيق هدف ربح +{target}%</b>\n"
-                        f"💎 <b>العملة:</b> {sym}\n"
-                        f"📊 <b>الربح منذ التنبيه الأول:</b> +{change_pct:.2f}%\n"
-                        f"💵 <b>سعر الدخول:</b> {entry:.8f} • <b>السعر الحالي:</b> {last:.8f}\n"
-                        f"🕒 <b>الفريم:</b> {TIMEFRAME}  |  💹 <b>النوع:</b> سبوت\n"
-                        f"⏰ <b>الوقت:</b> {tz_now_str()}\n"
-                        f"🔗 <a href='{mexc_link(sym)}'>فتح الشارت على MEXC</a>"
-                    )
-                    await send_message(msg)
-
-            # خزّن الأهداف التي تحققت
-            info["hit"] = sorted(list(set(hit)))
-            positions[sym] = info
-
-        if updated:
-            state["positions"] = positions
-            save_state(state)
-
-# ============ الحلقة الرئيسية ============
+# ==========================
+# حلقة التشغيل كل ساعة
+# ==========================
 async def main_loop():
-    """يشغّل تحليل كامل كل ساعة، ويتحقق من الأهداف كل 5 دقائق."""
-    # تشغيل آنيّ مرّة عند البدء
-    await run_analysis()
-
-    # مؤقّتات متداخلة
-    last_full = 0.0
     while True:
-        now = asyncio.get_event_loop().time()
-
-        # تحليل كامل كل ساعة
-        if now - last_full >= CHECK_GAP_S:
-            try:
-                await run_analysis()
-            finally:
-                last_full = now
-
-        # مراجعة الأهداف كل 5 دقائق
-        try:
-            await check_targets()
-        except Exception as e:
-            print("⚠️ خطأ في مراجعة الأهداف:", e)
-
-        await asyncio.sleep(TARGET_PING_S)
+        await run_analysis()
+        print("⏳ سيتم التحديث بعد ساعة...")
+        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
     asyncio.run(main_loop())
