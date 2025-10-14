@@ -39,9 +39,15 @@ async def analyze_symbol(session, symbol):
         if not isinstance(data, list) or len(data) < 50:
             return
 
-        df = pd.DataFrame(data, columns=[
-            'timestamp', 'open', 'high', 'low', 'close', 'volume', '_', '__', '___', '____', '_____', '______'
-        ])
+        # ✅ التعامل مع اختلاف عدد الأعمدة (8 أو 12)
+        columns_8 = ['timestamp', 'open', 'high', 'low', 'close', 'volume', '_', '__']
+        columns_12 = ['timestamp', 'open', 'high', 'low', 'close', 'volume', '_', '__', '___', '____', '_____', '______']
+
+        if len(data[0]) == 8:
+            df = pd.DataFrame(data, columns=columns_8)
+        else:
+            df = pd.DataFrame(data, columns=columns_12)
+
         df["close"] = df["close"].astype(float)
 
         # حساب EMA200 و RSI
@@ -89,7 +95,7 @@ async def run_analysis():
         async with session.get(f"{BASE_URL}/ticker/24hr") as resp:
             tickers = await resp.json()
 
-        # فحص فقط أزواج USDT ذات حجم تداول كبير
+        # ✅ فحص فقط أزواج USDT ذات حجم تداول قوي
         symbols = [
             t["symbol"] for t in tickers
             if t["symbol"].endswith("USDT") and float(t["quoteVolume"]) > 500000
