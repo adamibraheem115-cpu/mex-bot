@@ -1,0 +1,7 @@
+requests
+pandas
+pandas_ta
+python-telegram-bot==20.3
+aiohttp
+nest_asyncio
+schedule
