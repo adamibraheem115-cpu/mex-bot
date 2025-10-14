@@ -1,4 +1,3 @@
-!pip install --quiet aiohttp python-telegram-bot==20.3 pandas pandas_ta nest_asyncio
 
 import asyncio, aiohttp, pandas as pd, pandas_ta as ta, nest_asyncio
 from telegram import Bot
