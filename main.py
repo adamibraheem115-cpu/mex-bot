@@ -1,202 +1,113 @@
-
-import asyncio, aiohttp, pandas as pd, pandas_ta as ta, nest_asyncio
+import asyncio
+import aiohttp
+import pandas as pd
+import pandas_ta as ta
 from telegram import Bot
-from datetime import datetime
-import pytz
 
-nest_asyncio.apply()
-
-# ======================
-# 🔧 إعدادات البوت
-# ======================
+# ==========================
+# إعدادات البوت والتوكن
+# ==========================
 BOT_TOKEN = "8097310973:AAE68aYlgPb1onGzvWDk4GbYWlPJBNQOzJI"
 CHAT_ID = "8137529944"
+
 bot = Bot(token=BOT_TOKEN)
-tz = pytz.timezone("Asia/Riyadh")
 
-# ======================
-# ⚙️ إعدادات التحليل
-# ======================
-VOLUME_THRESHOLD = 300_000
-EMA_PERIOD = 200
-RSI_PERIOD = 14
-CHANGE_THRESHOLD = 1.0
-COOLDOWN_HOURS = 8
-MIN_PRICE = 0.005
+# ==========================
+# إعدادات MEXC API
+# ==========================
 BASE_URL = "https://api.mexc.com/api/v3"
+TIMEFRAME = "4h"  # فريم 4 ساعات
 
-TARGET_LEVELS = [10, 20, 30, 40, 50, 75, 100, 150, 200, 300, 500]
-DROP_ALERT = -10  # 🔻 الهبوط النسبي من آخر قمة
-last_alert = {}
-
-# ======================
-# 🕐 جلب بيانات الشموع
-# ======================
-async def get_klines(session, symbol):
-    url = f"{BASE_URL}/klines?symbol={symbol}&interval=4h&limit=300"
+# ==========================
+# دالة إرسال تنبيهات تليجرام
+# ==========================
+async def send_telegram_message(message):
     try:
-        async with session.get(url, timeout=10) as resp:
-            data = await resp.json()
-            if not isinstance(data, list):
-                return None
-            df = pd.DataFrame(data, columns=['t','o','h','l','c','v','x','y','z','a','b','ignore'])
-            df['c'] = df['c'].astype(float)
-            df['v'] = df['v'].astype(float)
-            df['ema200'] = ta.ema(df['c'], length=EMA_PERIOD)
-            df['rsi'] = ta.rsi(df['c'], length=RSI_PERIOD)
-            return df
-    except:
-        return None
+        await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode="HTML")
+    except Exception as e:
+        print("❌ خطأ في إرسال الرسالة:", e)
 
-# ======================
-# 💎 تنبيه دخول
-# ======================
-async def send_entry_alert(symbol, price, ema200, rsi, volume, change):
-    url = f"https://www.mexc.com/exchange/{symbol.replace('USDT','_USDT')}"
-    if volume > 10_000_000 and change > 5:
-        strength = "🚀 سيولة قوية جدًا — دخول ذكي"
-    elif volume > 3_000_000:
-        strength = "🟢 سيولة متوسطة — دخول جيد"
-    else:
-        strength = "🟡 سيولة منخفضة — تحتاج متابعة"
-
-    text = f"""
-💎 <b>دخول سيولة مال ذكي</b>
-
-📊 <b>العملة:</b> {symbol}
-💵 <b>السعر الحالي:</b> {price:.6f} USDT
-📈 <b>الارتداد من القاع:</b> +{change:.2f} %
-📊 <b>RSI:</b> {rsi:.1f}
-📉 <b>EMA200:</b> {ema200:.3f}
-💰 <b>حجم التداول آخر 24 ساعة:</b> ${volume:,.0f}
-🏦 <b>السيولة:</b> {strength}
-💹 <b>نوع التداول:</b> سبوت
-📍 <b>المنصة:</b> MEXC
-🧠 <b>تحليل:</b> دخول مبكر من المال الذكي قبل الانفجار
-🔗 <a href="{url}">رابط الشارت على MEXC</a>
-
-⏰ {datetime.now(tz).strftime('%Y-%m-%d %H:%M')}
-"""
-    await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="HTML", disable_web_page_preview=False)
-
-# ======================
-# 🎯 تنبيه تحقيق هدف
-# ======================
-async def send_target_alert(symbol, price, entry, gain):
-    url = f"https://www.mexc.com/exchange/{symbol.replace('USDT','_USDT')}"
-    text = f"""
-🎯 <b>{symbol}</b> حققت هدف جديد!
-
-💵 <b>سعر الدخول:</b> {entry:.6f} USDT
-🚀 <b>السعر الحالي:</b> {price:.6f} USDT
-📈 <b>الربح:</b> +{gain:.2f} %
-💎 <b>العملة وصلت مستوى {int(gain)} %</b>
-💹 <b>نوع التداول:</b> سبوت
-🔗 <a href="{url}">رابط الشارت</a>
-"""
-    await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="HTML", disable_web_page_preview=False)
-
-# ======================
-# 🔻 تنبيه الهبوط (التصحيح)
-# ======================
-async def send_drop_alert(symbol, price, peak, drop_percent):
-    url = f"https://www.mexc.com/exchange/{symbol.replace('USDT','_USDT')}"
-    text = f"""
-⚠️ <b>تنبيه تصحيح للسعر</b>
-
-📊 <b>العملة:</b> {symbol}
-💎 <b>من آخر قمة:</b> {peak:.6f} → {price:.6f}
-📉 <b>نسبة الهبوط:</b> {drop_percent:.2f} %
-💹 <b>نوع التداول:</b> سبوت
-🔍 <b>قد يكون تصحيح لجني أرباح أو بداية ضعف</b>
-🔗 <a href="{url}">رابط الشارت</a>
-"""
-    await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="HTML", disable_web_page_preview=False)
-
-# ======================
-# 🔍 تحليل عملة واحدة
-# ======================
+# ==========================
+# تحليل العملة
+# ==========================
 async def analyze_symbol(session, symbol):
     try:
-        df = await get_klines(session, symbol)
-        if df is None or len(df) < EMA_PERIOD:
+        url = f"{BASE_URL}/klines?symbol={symbol}&interval={TIMEFRAME}&limit=200"
+        async with session.get(url) as resp:
+            data = await resp.json()
+
+        if not isinstance(data, list) or len(data) < 50:
             return
 
-        last = df.iloc[-1]
-        price, ema200, rsi = last['c'], last['ema200'], last['rsi']
-        if price < MIN_PRICE:
+        df = pd.DataFrame(data, columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume', '_', '__', '___', '____', '_____', '______'
+        ])
+        df["close"] = df["close"].astype(float)
+
+        # حساب EMA200 و RSI
+        df["EMA200"] = ta.ema(df["close"], length=200)
+        df["RSI"] = ta.rsi(df["close"], length=14)
+
+        last_close = df["close"].iloc[-1]
+        last_ema = df["EMA200"].iloc[-1]
+        last_rsi = df["RSI"].iloc[-1]
+
+        # تحديد قوة الفرصة
+        strength = ""
+        if last_close > last_ema and last_rsi < 70:
+            strength = "🚀 قوية"
+        elif last_close > last_ema and 70 <= last_rsi <= 80:
+            strength = "⚡ متوسطة"
+        elif last_close < last_ema and last_rsi < 30:
+            strength = "📉 ضعيفة"
+        else:
             return
 
-        async with session.get(f"{BASE_URL}/ticker/24hr?symbol={symbol}") as resp:
-            t = await resp.json()
-        if not isinstance(t, dict):
-            return
+        # رابط العملة على منصة MEXC
+        coin_link = f"https://www.mexc.com/exchange/{symbol.replace('USDT','_USDT')}"
 
-        volume = float(t.get('quoteVolume', 0))
-        change = float(t.get('priceChangePercent', 0))
+        message = (
+            f"📊 <b>فرصة تداول جديدة</b>\n"
+            f"💰 العملة: <b>{symbol}</b>\n"
+            f"🕒 الإطار الزمني: {TIMEFRAME}\n"
+            f"📈 القوة: {strength}\n"
+            f"💵 السعر الحالي: {last_close:.6f}\n"
+            f"🔗 <a href='{coin_link}'>رابط العملة على MEXC</a>\n"
+            f"💹 نوع التداول: سبوت"
+        )
 
-        # دخول
-        if (
-            volume >= VOLUME_THRESHOLD
-            and price > ema200
-            and 45 <= rsi <= 70
-            and change >= CHANGE_THRESHOLD
-        ):
-            if symbol not in last_alert or (
-                datetime.now() - last_alert[symbol]["time"]
-            ).total_seconds() > COOLDOWN_HOURS * 3600:
-                await send_entry_alert(symbol, price, ema200, rsi, volume, change)
-                last_alert[symbol] = {
-                    "entry": price,
-                    "time": datetime.now(),
-                    "targets": set(),
-                    "peak": price
-                }
-
-        # أهداف ورصد هبوط
-        if symbol in last_alert:
-            entry = last_alert[symbol]["entry"]
-            gain = ((price - entry)/entry)*100
-            last_alert[symbol]["peak"] = max(price, last_alert[symbol]["peak"])
-            for target in TARGET_LEVELS:
-                if gain >= target and target not in last_alert[symbol]["targets"]:
-                    await send_target_alert(symbol, price, entry, gain)
-                    last_alert[symbol]["targets"].add(target)
-
-            peak = last_alert[symbol]["peak"]
-            drop_percent = ((price - peak)/peak)*100
-            if drop_percent <= DROP_ALERT:
-                await send_drop_alert(symbol, price, peak, drop_percent)
-                last_alert[symbol]["peak"] = price
+        await send_telegram_message(message)
 
     except Exception as e:
-        print(f"⚠️ خطأ في {symbol}: {e}")
+        print(f"⚠️ خطأ في تحليل {symbol}:", e)
 
-# ======================
-# 🧠 تحليل السوق كامل
-# ======================
+# ==========================
+# تشغيل التحليل العام
+# ==========================
 async def run_analysis():
     async with aiohttp.ClientSession() as session:
         async with session.get(f"{BASE_URL}/ticker/24hr") as resp:
             tickers = await resp.json()
 
-        symbols = [t['symbol'] for t in tickers if t['symbol'].endswith('USDT')]
+        # فحص فقط أزواج USDT ذات حجم تداول كبير
+        symbols = [
+            t["symbol"] for t in tickers
+            if t["symbol"].endswith("USDT") and float(t["quoteVolume"]) > 500000
+        ]
 
-        print(f"🔍 فحص {len(symbols)} عملة...")
+        print(f"🔍 يتم فحص {len(symbols)} عملة...")
         tasks = [analyze_symbol(session, s) for s in symbols[:400]]
         await asyncio.gather(*tasks)
         print("✅ التحليل اكتمل!")
 
-# ======================
-# ⏳ تشغيل تلقائي كل ساعة
-# ======================
-async def main():
+# ==========================
+# التشغيل التلقائي كل ساعة
+# ==========================
+async def main_loop():
     while True:
         await run_analysis()
-        print("⏳ تحديث بعد ساعة...")
+        print("⏳ سيتم التحديث بعد ساعة...")
         await asyncio.sleep(3600)
 
-import asyncio
-asyncio.run(main_loop())
-
-
+if __name__ == "__main__":
+    asyncio.run(main_loop())
