@@ -19,10 +19,11 @@ BASE_URL = "https://api.mexc.com/api/v3"
 TIMEFRAME = "4h"  # فريم 4 ساعات
 
 # ==========================
-# دالة إرسال تنبيهات تليجرام
+# دالة إرسال تنبيهات تليجرام (مع تأخير ذكي)
 # ==========================
 async def send_telegram_message(message):
     try:
+        await asyncio.sleep(0.5)  # تأخير نصف ثانية بين الرسائل
         await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode="HTML")
     except Exception as e:
         print("❌ خطأ في إرسال الرسالة:", e)
@@ -102,7 +103,14 @@ async def run_analysis():
         ]
 
         print(f"🔍 يتم فحص {len(symbols)} عملة...")
-        tasks = [analyze_symbol(session, s) for s in symbols[:400]]
+    semaphore = asyncio.Semaphore(10)  # تحديد عدد المهام المتزامنة إلى 10 فقط
+
+async def safe_analyze(symbol):
+    async with semaphore:
+        await analyze_symbol(session, symbol)
+
+tasks = [safe_analyze(s) for s in symbols[:300]]  # نحلل حتى 300 عملة كحد أقصى
+
         await asyncio.gather(*tasks)
         print("✅ التحليل اكتمل!")
 
