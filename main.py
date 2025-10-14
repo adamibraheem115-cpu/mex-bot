@@ -196,10 +196,7 @@ async def main():
         print("⏳ تحديث بعد ساعة...")
         await asyncio.sleep(3600)
 
-# ======================
-# نقطة تشغيل الكود
-# ======================
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+import asyncio
+asyncio.run(main_loop())
+
 
