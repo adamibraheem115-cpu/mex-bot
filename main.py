@@ -1,5 +1,5 @@
 # -- coding: utf-8 --
-import asyncio, requests, pandas as pd, os, pytz, nest_asyncio, time, json, logging, math
+import requests, pandas as pd, os, pytz, time, json, logging, math
 from datetime import datetime
 from telegram import Bot
 
@@ -282,7 +282,6 @@ async def run_bot():
     while True:
         await analyze_market()
         await asyncio.sleep(CHECK_INTERVAL)
-
-if _name_ == "_main_":
+if __name__ == "__main__":
     nest_asyncio.apply()
     asyncio.get_event_loop().run_until_complete(run_bot())
